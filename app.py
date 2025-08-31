@@ -1,5 +1,6 @@
 from openai import OpenAI
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string, Response
+import json
 import os
 
 app = Flask(__name__)
@@ -9,72 +10,16 @@ client = OpenAI(
     base_url=os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 )
 
+# 存储对话历史
+conversation_history = []
+
 @app.route('/')
 def index():
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>非暴力沟通 AI 助手</title>
-        <meta charset="UTF-8">
-        <style>
-            body { font-family: Arial, sans-serif; margin: 40px; }
-            .chat { max-width: 600px; margin: 0 auto; }
-            .message { margin: 10px 0; padding: 10px; border-radius: 5px; }
-            .user { background: #e3f2fd; text-align: right; }
-            .ai { background: #f1f8e9; }
-            input, button { margin: 10px 0; padding: 10px; }
-            input { width: 70%; }
-        </style>
-    </head>
-    <body>
-        <div class="chat">
-            <h1>非暴力沟通 AI 助手</h1>
-            <div id="messages"></div>
-            <input type="text" id="input" placeholder="输入你的问题...">
-            <button onclick="sendMessage()">发送</button>
-        </div>
-        <script>
-            async function sendMessage() {
-                const input = document.getElementById('input');
-                const message = input.value;
-                if (!message) return;
-                
-                // 显示用户消息
-                addMessage(message, 'user');
-                input.value = '';
-                
-                try {
-                    const response = await fetch('/chat', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({message: message})
-                    });
-                    
-                    const data = await response.json();
-                    addMessage(data.response, 'ai');
-                } catch (error) {
-                    addMessage('抱歉，出现错误，请稍后再试。', 'ai');
-                }
-            }
-            
-            function addMessage(text, sender) {
-                const messages = document.getElementById('messages');
-                const div = document.createElement('div');
-                div.className = 'message ' + sender;
-                div.textContent = text;
-                messages.appendChild(div);
-                messages.scrollTop = messages.scrollHeight;
-            }
-            
-            // 回车发送
-            document.getElementById('input').addEventListener('keypress', function(e) {
-                if (e.key === 'Enter') sendMessage();
-            });
-        </script>
-    </body>
-    </html>
-    '''
+    try:
+        with open('index.html', 'r', encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        return "HTML file not found", 404
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -85,28 +30,75 @@ def chat():
         if not user_message:
             return jsonify({'error': '消息不能为空'}), 400
 
-        # 调用通义千问 API
-        response = client.chat.completions.create(
-            model="qwen-max",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一位熟悉《非暴力沟通》的老师，请结合书中的内容和实例，耐心讲解，风格亲切。"
-                },
-                {
-                    "role": "user",
-                    "content": user_message
-                }
-            ],
-            stream=False,
-        )
+        # 构建消息历史
+        messages = [
+            {
+                "role": "system",
+                "content": "你是一位熟悉《非暴力沟通》的老师，请结合书中的内容和实例，耐心讲解，风格亲切。"
+            }
+        ]
         
-        ai_response = response.choices[0].message.content
-        return jsonify({'response': ai_response})
+        # 添加对话历史
+        for msg in conversation_history[-10:]:  # 只保留最近10条消息
+            messages.append(msg)
+        
+        # 添加当前用户消息
+        messages.append({"role": "user", "content": user_message})
+        
+        def generate():
+            try:
+                # 调用通义千问 API，启用流式输出
+                response = client.chat.completions.create(
+                    model="qwen-max",
+                    messages=messages,
+                    tools=[
+                        {
+                            "type": "retrieval",
+                            "function": {
+                                "name": "knowledge_search",
+                                "description": "搜索非暴力沟通相关的知识库内容"
+                            },
+                            "retrieval": {
+                                "knowledge_id": "gyy4cpk7df"
+                            }
+                        }
+                    ],
+                    stream=True,  # 启用流式输出
+                )
+                
+                full_response = ""
+                
+                for chunk in response:
+                    if chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        full_response += content
+                        # 发送每个字符到前端
+                        yield f"data: {json.dumps({'content': content, 'done': False})}\n\n"
+                
+                # 保存对话历史
+                conversation_history.append({"role": "user", "content": user_message})
+                conversation_history.append({"role": "assistant", "content": full_response})
+                
+                # 发送完成信号
+                yield f"data: {json.dumps({'content': '', 'done': True})}\n\n"
+                
+            except Exception as e:
+                print(f"Error in stream: {e}")
+                yield f"data: {json.dumps({'error': '服务器错误', 'done': True})}\n\n"
+        
+        return Response(generate(), mimetype='text/plain')
         
     except Exception as e:
         print(f"Error: {e}")
         return jsonify({'error': '服务器内部错误'}), 500
+
+# Vercel 需要这个
+app.debug = False
+
+if __name__ == '__main__':
+    print("启动非暴力沟通 AI 助手...")
+    print("访问地址: http://localhost:8080")
+    app.run(debug=True, host='0.0.0.0', port=8080) 
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=8080) 
