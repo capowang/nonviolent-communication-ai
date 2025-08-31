@@ -92,6 +92,7 @@ def chat():
 # Vercel 需要这个
 app.debug = False
 
+# 为了兼容 Vercel
 if __name__ == '__main__':
     print("启动非暴力沟通 AI 助手...")
     print("访问地址: http://localhost:8080")
